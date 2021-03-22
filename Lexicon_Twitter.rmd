@@ -1,0 +1,249 @@
+---
+title: "Análise de Dados do Twitter com Dicionários Léxicos"
+output: html_document
+runtime: shiny
+---
+
+# Dados do Twitter sobre o Coronavirus (Inglês)
+
+## Coleta de Dados
+
+Uma aplicação muito recorrente da Análise de Sentimentos é analisar dados de mídias sociais. E, para o caso da análise de texto, o Twitter é o mais utilizado. Felizmente, é possível obter dados de Tweets diretamente no R através da API com uma conta de desenvolvedor e por meio do pacote `rtweet`. Para isso é necessário obter as chaves de acesso da conta de desenvolvedor.
+
+```{r message=FALSE, warning=FALSE}
+library(rtweet)
+library(dplyr)
+library(tidyr)
+library(tidytext)
+library(textdata)
+library(ggplot2)
+library(reshape2)
+library(wordcloud)
+library(stringr)
+library(shiny)
+library(DT)
+```
+
+```{r eval=FALSE}
+token <- create_token(
+  app = "AppName",
+  consumer_key = "XXXXXXXXXXXXXXXXXXXXXX",
+  consumer_secret = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  access_token="XXXXXXXXXXXXXXXXXXXXXXX-XXXXXXXXXXXXXXXXXXXXX",
+  access_secret = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+token <- create_token(
+  app = "AppName",
+  consumer_key = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  consumer_secret = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  access_token="XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  access_secret = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+```
+
+Feito isso, é possível coletar os dados através da função `search_tweets()`, pesquisando uma *hashtag*. Neste exempo, serão obtidos cerca de 5 mil tweets com **#Corona**, em inglês e sem considerar os *retweets*
+
+```{r eval=FALSE}
+Corona <- search_tweets("#corona", n=5000, include_rts = F, lang = "en")
+
+renderDataTable({DT::datatable(head(Corona %>% select(screen_name, text)))})
+```
+
+```{r echo=FALSE}
+Corona <- readRDS("Corona_10-10-20.rds")
+
+renderDataTable({DT::datatable(head(Corona %>% select(screen_name, text)))})
+```
+
+São fornecidas uma série de informações como o nome de usuário, localidade, *hashtags* utilizadas, além do texto do tweet que é o que usaremos.  
+
+```{r}
+tweets.Corona <- Corona %>% select(screen_name, text)
+```
+
+
+## Pré-Processamento
+
+Antes das análises é importante aplicar algumas técnicas de pré-processamento. Serão removidos links dos tweets e será aplicada a *tokenization* para dividir os textos em palavras, além de transformar todos os caracteres em *lowercase* e remover pontuações.
+
+```{r}
+tweets.Corona <- tweets.Corona %>% 
+  mutate(stripped_text=gsub("http\\S+","",tweets.Corona$text)) # Remove links
+
+tweets.Corona_stem <- tweets.Corona %>% # Tokenization
+  select(stripped_text) %>%
+  unnest_tokens(word, stripped_text)
+```
+
+Por fim, serão removidas as *stopwords*.
+
+```{r message=FALSE, warning=FALSE}
+cleaned_tweets.Corona <- tweets.Corona_stem %>% # Remove stopwords
+  anti_join(stop_words)
+
+cleaned_tweets.Corona$word[1:10]
+```
+
+## Análise Descritiva Geral
+
+Nesta primeira análise todos os textos foram considerados como um só para que se possa ter uma noção geral do que se têm falado acerca do corona vírus.
+
+```{r}
+cleaned_tweets.Corona %>% 
+  count(word, sort=TRUE) %>% 
+  top_n(10) %>% 
+  mutate(word = reorder(word,n)) %>% 
+  ggplot(aes(x=word, y=n)) + geom_col() + xlab(NULL) + coord_flip() +
+  theme_classic() + 
+  labs(x= "Contagem", y="Palavras Únicas", 
+       title="Palavras Únicas Encontradas em Tweets com #Corona")
+
+```
+
+### Dicionários Léxicos
+
+O pacote `tidytext` oferece, por meio da função `get_sentiments()`, 4 dicionários léxicos: *bing*, *afinn*, *nrc* e *loughran*. Todos possuem palavras do inglês e uma informação sentimental correspondente.  
+No caso dos dicionários *bing*, *nrc* e *loughran*, cada palavras é associada a um sentimento.
+
+```{r}
+get_sentiments("bing") %>% group_by(sentiment) %>% count()
+
+get_sentiments("nrc") %>% group_by(sentiment) %>% count()
+
+get_sentiments("loughran") %>% group_by(sentiment) %>% count()
+```
+
+Já para o dicionário *afinn*, cada palavra possui uma intensidade sentimental que é um valor inteiro entre -5 e 5. Se esse valor é positivo, o sentimento é positivo. Se for igual a zero, o mesmo é neutro. Caso contrário, é negativo.
+
+```{r}
+get_sentiments("afinn") %>% group_by(value) %>% count()
+```
+
+Neste exemplo será usado o dicionário *bing* que possui apenas sentimentos positivo e negativo.
+
+```{r message=FALSE, warning=FALSE}
+bing_Corona <- cleaned_tweets.Corona %>% 
+  inner_join(get_sentiments("bing")) %>% 
+  count(word, sentiment, sort=TRUE) %>% 
+  ungroup()
+
+bing_Corona
+```
+
+Dessa forma, cada palavra do banco que está presente no dicionário é associada a um sentimento positivo ou negativo.  
+
+É possível, então, verificarmos quais as palavras mais frequentes para cada sentimento.
+
+```{r message=FALSE, warning=FALSE}
+bing_Corona %>% 
+  group_by(sentiment) %>% 
+  top_n(10) %>% 
+  ungroup() %>% 
+  mutate(word=reorder(word,n)) %>% 
+  ggplot(aes(word, n, fill=sentiment)) + geom_col(show.legend = F) +
+  facet_wrap(~sentiment, scales="free_y") +
+  labs(title="Tweets Containing '#Corona'",
+       y="Contribution to sentiment",
+       x=NULL) +
+  coord_flip() + theme_bw()
+```
+
+Outra descritiva muito interessante é a nuvem de palavras que permite observar as palavras, de modo que seu tamanho é relativo à frequência e a cor ao sentimento associado.
+
+```{r}
+bing_Corona %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(colors = c("red", "darkgreen"),
+                   max.words = 100)
+```
+
+## Dicionário Léxico por Tweet
+
+Além da análise geral é possível utilizar o dicionário léxico em cada texto separadamente e, assim, associoar um sentimento a cada tweet individual.  
+
+Para isso, será utilizado o dicionário *afinn* que associa um valor numérico a cada palavra. Para classificar o tweet serão somados os valores de sentimento de cada palavra do texto. Se a soma for positiva, o tweet será classificado como positivo. Se a soma resultar em zero, o sentimento é neutro. Caso contrário, negativo.
+
+```{r message=FALSE, warning=FALSE}
+for(i in 1:nrow(tweets.Corona)){
+  d <- (tweets.Corona[i,3] %>% unnest_tokens(word, stripped_text) %>% 
+    anti_join(stop_words) %>% inner_join(get_sentiments("afinn")))$value %>% sum()
+  tweets.Corona$value[i] <- d
+}
+
+tweets.Corona <- tweets.Corona %>%
+  mutate(sentiment=case_when(value>0 ~ "positive",
+                             value <0 ~ "negative",
+                             TRUE ~ "neutral"))
+```
+
+```{r}
+tweets.Corona$sentiment %>% table()
+```
+
+Com isso, é possível ver um equilíbrio entre tweets positivos e negativos.
+
+Utilizando as técnicas aplicadas acima é possível classificar qualquer texto em inglês utilizando o dicionário *afinn*.   
+Experimente:
+
+```{r echo=FALSE}
+textInput("texto", "Insira um texto em inglês:", width = '800px',
+          value="I love this!")
+```
+
+```{r echo=FALSE}
+renderTable({
+  d <- (as_tibble(input$texto) %>% unnest_tokens(word, value) %>% 
+    anti_join(stop_words) %>% inner_join(get_sentiments("afinn")))$value %>% sum()
+if(d>0){sentiment="Positive"}else if(d==0){sentiment="Neutral"}else{sentiment="Negative"}
+  
+  tibble(Texto=input$texto, Sentimento=sentiment, Intensidade=d)
+})
+```
+
+
+## Dicionário Léxico em Português
+
+De forma análoga à apresentada anteriormente, é possível utilizar um dicionário léxico para classificar textos em português. Será usado o dicionário oferecido pelo pacote `lexiconPT` que associa, a cada palavra, uma polaridade negativa (-1), positiva (1) ou neutra (0).
+
+```{r eval=FALSE}
+devtools::install_github("sillasgonzaga/lexiconPT")
+```
+
+```{r message=FALSE, warning=FALSE}
+library(lexiconPT)
+library(readr)
+
+lexiconPT::oplexicon_v3.0[1100:1110,c(1,3)]
+```
+
+Além do dicionário, será usado uma lista de stopwords em português disponibilizado pelo [LabAPE](http://www.labape.com.br/labape/)
+
+```{r message=FALSE, warning=FALSE}
+stopwordspt <- read_csv(
+    file = "http://www.labape.com.br/rprimi/ds/stopwords.txt", 
+    col_names = 'word')
+```
+
+Experimente:
+
+```{r echo=FALSE}
+textInput("textopt", "Insira um texto em português:", width = '800px',
+          value="Você é legal!")
+```
+
+```{r echo=FALSE}
+lexicon_pt <- lexiconPT::oplexicon_v3.0 %>% select(term, polarity) %>% 
+  rename(word=term, value=polarity)
+```
+
+```{r echo=FALSE}
+renderTable({
+  d <- (as_tibble(input$textopt) %>% unnest_tokens(word, value) %>% 
+    anti_join(stopwordspt) %>% inner_join(lexicon_pt))$value %>% sum()
+if(d>0){sentiment="Positive"}else if(d==0){sentiment="Neutral"}else{sentiment="Negative"}
+  
+  tibble(Texto=input$textopt, Sentimento=sentiment, Intensidade=d)
+})
+```
+
